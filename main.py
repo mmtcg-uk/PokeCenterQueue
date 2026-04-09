@@ -6,6 +6,7 @@ from typing import Dict, Tuple
 
 import requests
 from playwright.sync_api import sync_playwright
+print("🔥 BOT STARTING...")
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "20"))
