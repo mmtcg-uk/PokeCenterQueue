@@ -1,17 +1,28 @@
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Dict, Tuple
 
 import requests
 from playwright.sync_api import sync_playwright
-print("🔥 BOT STARTING...")
+
+# 🔥 DEBUG START
+print("🔥 BOT STARTING...", flush=True)
+print(f"🐍 Python version: {sys.version}", flush=True)
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "20"))
 MENTION_TEXT = os.getenv("MENTION_TEXT", "@everyone")
 BROWSERLESS_WS_URL = os.getenv("BROWSERLESS_WS_URL", "")
+
+print(f"🔑 Webhook set: {bool(DISCORD_WEBHOOK_URL)}", flush=True)
+print(f"🌐 Browserless URL set: {bool(BROWSERLESS_WS_URL)}", flush=True)
+
+if not BROWSERLESS_WS_URL:
+    raise RuntimeError("❌ BROWSERLESS_WS_URL is not set")
+
 STATE_FILE = Path("state.json")
 HEARTBEAT_FILE = Path("heartbeat.txt")
 
@@ -62,7 +73,7 @@ def save_state(state):
 
 def send_discord_message(payload: dict):
     if not DISCORD_WEBHOOK_URL:
-        print("⚠️ DISCORD_WEBHOOK_URL not set")
+        print("⚠️ DISCORD_WEBHOOK_URL not set", flush=True)
         return
 
     response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=15)
@@ -91,9 +102,9 @@ def send_discord_alert(store: Dict[str, str], final_url: str):
 
     try:
         send_discord_message(payload)
-        print(f"📨 Discord alert sent for {store['name']}")
+        print(f"📨 Discord alert sent for {store['name']}", flush=True)
     except Exception as e:
-        print(f"Discord error: {e}")
+        print(f"Discord error: {e}", flush=True)
 
 
 def send_status_message(text: str):
@@ -101,11 +112,18 @@ def send_status_message(text: str):
     try:
         send_discord_message(payload)
     except Exception as e:
-        print(f"Status message error: {e}")
+        print(f"Status message error: {e}", flush=True)
 
 
 def detect_queue(page, store_url: str) -> Tuple[bool, str]:
+    print(f"🌍 Visiting {store_url}", flush=True)
+
     response = page.goto(store_url, wait_until="domcontentloaded", timeout=45000)
+
+    status = None if response is None else response.status
+    final_url = page.url
+
+    print(f"➡️ Status: {status} | Final URL: {final_url}", flush=True)
 
     if response is not None and response.status >= 400:
         raise RuntimeError(f"HTTP {response.status} for {store_url}")
@@ -137,18 +155,20 @@ def detect_queue(page, store_url: str) -> Tuple[bool, str]:
 
 
 def main():
-    if not BROWSERLESS_WS_URL:
-        raise RuntimeError("BROWSERLESS_WS_URL is not set")
-
     state = load_state()
 
-    print("🚀 Watcher started...")
-    print(f"⏱ Checking every {CHECK_INTERVAL_SECONDS} seconds")
+    print("🚀 Watcher started...", flush=True)
+    print(f"⏱ Checking every {CHECK_INTERVAL_SECONDS} seconds", flush=True)
 
     startup_sent = False
 
     with sync_playwright() as p:
+        print("🔌 About to connect to Browserless...", flush=True)
+
         browser = p.chromium.connect_over_cdp(BROWSERLESS_WS_URL)
+
+        print("✅ Connected to Browserless", flush=True)
+
         context = browser.new_context(
             user_agent=BROWSER_USER_AGENT,
             locale="en-GB",
@@ -170,7 +190,7 @@ def main():
                         is_live, final_url = detect_queue(page, store["url"])
                         was_live = state[code]["was_live"]
 
-                        print(f"{code}: {is_live} ({final_url})")
+                        print(f"{code}: {is_live}", flush=True)
 
                         if is_live and not was_live:
                             send_discord_alert(store, final_url)
@@ -179,7 +199,7 @@ def main():
                         state[code]["last_final_url"] = final_url
 
                     except Exception as e:
-                        print(f"{code} error: {e}")
+                        print(f"{code} error: {e}", flush=True)
 
                     finally:
                         page.close()
@@ -187,7 +207,7 @@ def main():
                 save_state(state)
 
             except Exception as e:
-                print(f"Main loop error: {e}")
+                print(f"Main loop error: {e}", flush=True)
 
             time.sleep(CHECK_INTERVAL_SECONDS)
 
