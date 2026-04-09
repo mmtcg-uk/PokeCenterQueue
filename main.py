@@ -5,11 +5,14 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 import requests
+from playwright.sync_api import sync_playwright
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
-CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "15"))
+CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "20"))
 MENTION_TEXT = os.getenv("MENTION_TEXT", "@everyone")
+BROWSERLESS_WS_URL = os.getenv("BROWSERLESS_WS_URL", "")
 STATE_FILE = Path("state.json")
+HEARTBEAT_FILE = Path("heartbeat.txt")
 
 STORES = {
     "US": {
@@ -29,16 +32,11 @@ STORES = {
     },
 }
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-}
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0.0.0 Safari/537.36"
+)
 
 
 def load_state():
@@ -49,12 +47,11 @@ def load_state():
             pass
 
     return {
-        store_code: {
+        code: {
             "was_live": False,
             "last_final_url": None,
-            "last_alerted_url": None,
         }
-        for store_code in STORES
+        for code in STORES
     }
 
 
@@ -62,82 +59,136 @@ def save_state(state):
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
-def queue_is_live(store_url: str) -> Tuple[bool, str]:
-    response = requests.get(
-        store_url,
-        headers=HEADERS,
-        allow_redirects=True,
-        timeout=20,
-    )
+def send_discord_message(payload: dict):
+    if not DISCORD_WEBHOOK_URL:
+        print("⚠️ DISCORD_WEBHOOK_URL not set")
+        return
+
+    response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=15)
     response.raise_for_status()
 
-    final_url = response.url
+
+def send_discord_alert(store: Dict[str, str], final_url: str):
+    payload = {
+        "content": f"{MENTION_TEXT} 🚨 **QUEUE LIVE** 🚨",
+        "embeds": [
+            {
+                "title": f"{store['flag']} {store['name']} Queue Detected",
+                "url": store["url"],
+                "description": (
+                    "🟢 **Queue is LIVE — act fast!**\n\n"
+                    f"👉 [Open Store]({store['url']})\n"
+                    f"👉 [Join Queue]({final_url})"
+                ),
+                "color": 16711680,
+                "footer": {
+                    "text": "PokeCenter Monitor • Live Alert"
+                },
+            }
+        ],
+    }
+
+    try:
+        send_discord_message(payload)
+        print(f"📨 Discord alert sent for {store['name']}")
+    except Exception as e:
+        print(f"Discord error: {e}")
+
+
+def send_status_message(text: str):
+    payload = {"content": text}
+    try:
+        send_discord_message(payload)
+    except Exception as e:
+        print(f"Status message error: {e}")
+
+
+def detect_queue(page, store_url: str) -> Tuple[bool, str]:
+    response = page.goto(store_url, wait_until="domcontentloaded", timeout=45000)
+
+    if response is not None and response.status >= 400:
+        raise RuntimeError(f"HTTP {response.status} for {store_url}")
+
+    page.wait_for_timeout(3000)
+
+    final_url = page.url
     final_url_lower = final_url.lower()
-    body = response.text.lower()
 
-    url_indicators = ["queue-it", "waitingroom", "queue"]
-    text_indicators = ["virtual queue", "waiting room", "queue-it", "line is paused"]
+    try:
+        text = page.locator("body").inner_text(timeout=10000).lower()
+    except Exception:
+        text = ""
 
-    is_live = any(x in final_url_lower for x in url_indicators) or any(
-        x in body for x in text_indicators
+    indicators = [
+        "queue-it",
+        "waiting room",
+        "virtual queue",
+        "line is paused",
+        "you are now in line",
+        "queue",
+    ]
+
+    is_live = any(x in final_url_lower for x in indicators) or any(
+        x in text for x in indicators
     )
 
     return is_live, final_url
 
 
-def send_discord_alert(store: Dict[str, str], final_url: str):
-    mention_parse = []
-    if "@everyone" in MENTION_TEXT or "@here" in MENTION_TEXT:
-        mention_parse.append("everyone")
-
-    payload = {
-        "content": f"{MENTION_TEXT} {store['flag']} {store['name']} queue is LIVE",
-        "allowed_mentions": {"parse": mention_parse},
-        "embeds": [
-            {
-                "title": f"{store['flag']} {store['name']} queue is live",
-                "url": store["url"],
-                "description": (
-                    f"[Open Store]({store['url']})\n"
-                    f"[Open Queue Page]({final_url})"
-                ),
-                "fields": [
-                    {"name": "Region", "value": store["flag"], "inline": True},
-                    {"name": "Store URL", "value": store["url"], "inline": False},
-                ],
-            }
-        ],
-    }
-
-    requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=15)
-
-
 def main():
+    if not BROWSERLESS_WS_URL:
+        raise RuntimeError("BROWSERLESS_WS_URL is not set")
+
     state = load_state()
 
-    print("Watcher started...")
-    print(f"Checking every {CHECK_INTERVAL_SECONDS} seconds")
+    print("🚀 Watcher started...")
+    print(f"⏱ Checking every {CHECK_INTERVAL_SECONDS} seconds")
 
-    while True:
-        for code, store in STORES.items():
+    startup_sent = False
+
+    with sync_playwright() as p:
+        browser = p.chromium.connect_over_cdp(BROWSERLESS_WS_URL)
+        context = browser.new_context(
+            user_agent=BROWSER_USER_AGENT,
+            locale="en-GB",
+            viewport={"width": 1440, "height": 900},
+        )
+
+        while True:
             try:
-                is_live, final_url = queue_is_live(store["url"])
-                was_live = state[code]["was_live"]
+                if not startup_sent:
+                    send_status_message("✅ PokeCenter Monitor is online")
+                    startup_sent = True
 
-                print(f"{code}: {is_live}")
+                HEARTBEAT_FILE.write_text(str(int(time.time())))
 
-                if is_live and not was_live:
-                    send_discord_alert(store, final_url)
-                    print(f"{code} ALERT SENT")
+                for code, store in STORES.items():
+                    page = context.new_page()
 
-                state[code]["was_live"] = is_live
-                state[code]["last_final_url"] = final_url
+                    try:
+                        is_live, final_url = detect_queue(page, store["url"])
+                        was_live = state[code]["was_live"]
+
+                        print(f"{code}: {is_live} ({final_url})")
+
+                        if is_live and not was_live:
+                            send_discord_alert(store, final_url)
+
+                        state[code]["was_live"] = is_live
+                        state[code]["last_final_url"] = final_url
+
+                    except Exception as e:
+                        print(f"{code} error: {e}")
+
+                    finally:
+                        page.close()
+
+                save_state(state)
 
             except Exception as e:
-                print(f"{code} error: {e}")
+                print(f"Main loop error: {e}")
 
-        save_state(state)
-        time.sleep(CHECK_INTERVAL_SECONDS)
+            time.sleep(CHECK_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
