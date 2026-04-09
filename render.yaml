@@ -1,0 +1,16 @@
+services:
+  - type: worker
+    name: pokecenter-queue-monitor
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    plan: starter
+    envVars:
+      - key: CHECK_INTERVAL_SECONDS
+        value: "20"
+      - key: MENTION_TEXT
+        value: "@everyone"
+      - key: DISCORD_WEBHOOK_URL
+        sync: false
+      - key: BROWSERLESS_WS_URL
+        sync: false
