@@ -13,11 +13,13 @@ print("🔥 BOT STARTING...", flush=True)
 print(f"🐍 Python version: {sys.version}", flush=True)
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+STATUS_WEBHOOK_URL = os.getenv("STATUS_WEBHOOK_URL", "")
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "20"))
 MENTION_TEXT = os.getenv("MENTION_TEXT", "@everyone")
 BROWSERLESS_WS_URL = os.getenv("BROWSERLESS_WS_URL", "")
 
 print(f"🔑 Webhook set: {bool(DISCORD_WEBHOOK_URL)}", flush=True)
+print(f"📋 Status webhook set: {bool(STATUS_WEBHOOK_URL)}", flush=True)
 print(f"🌐 Browserless URL set: {bool(BROWSERLESS_WS_URL)}", flush=True)
 
 if not BROWSERLESS_WS_URL:
@@ -108,9 +110,13 @@ def send_discord_alert(store: Dict[str, str], final_url: str):
 
 
 def send_status_message(text: str):
+    if not STATUS_WEBHOOK_URL:
+        return
+
     payload = {"content": text}
     try:
-        send_discord_message(payload)
+        response = requests.post(STATUS_WEBHOOK_URL, json=payload, timeout=15)
+        response.raise_for_status()
     except Exception as e:
         print(f"Status message error: {e}", flush=True)
 
